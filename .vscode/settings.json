@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "optional": "cpp",
+        "algorithm": "cpp",
+        "limits": "cpp",
+        "streambuf": "cpp"
+    }
+}
