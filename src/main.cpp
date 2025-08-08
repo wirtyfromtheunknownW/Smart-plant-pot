@@ -1,117 +1,147 @@
-#include "DHTesp.h"
-#include <Adafruit_GFX.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DHT.h>
 #include <Adafruit_SSD1306.h>
 
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
 #define OLED_RESET -1 
+#define DHTPIN 4
+#define DHTTYPE DHT11
 
-int pinDHT = 15;
-int pinMoisture = 2; // Pin for soil moisture sensor
-int _moisture,sensor_analog,analogValue;
-int pinLight = 4; // Pin for light sensor (not used in this example, but can be added later)
-// int analogValue = 0; // Variable to store the analog value from the light sensor
+#define MOISTURE_PIN 32  // ADC1_CH4
+#define LIGHT_PIN 33     // ADC1_CH5
+
+DHT dht(DHTPIN, DHTTYPE);
+WebServer server(80);
+
+int moistureValue = 0;
+int lightValue = 0;
+float temperature = 0;
+float humidity = 0;
+
+unsigned long lastMoistureLightRead = 0;
+unsigned long lastDHTRead = 0;
+
+const unsigned long moistureLightInterval = 30UL * 60UL * 1000UL; // 30 minutes
+const unsigned long dhtInterval = 15UL * 60UL * 1000UL;           // 15 minutes
+#define SENSOR_INTERVAL_MS 10000  // 60 seconds
+
+const char* ssid = "A1_A3AEFA";
+const char* password = "430af6a4";
+
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-  void getLightLevel(int analogValue) {
-  if (analogValue > 3000) {
-    display.println("Light: Dark");
-  } else if (analogValue > 2000) {
-    display.println("Light: Dim");
-  } else if (analogValue > 800) {
-    display.println("Light: Light");
-  } else if (analogValue > 40) {
-    display.println("Light: Bright");
+
+  String getLightLevel(int lightValue) {
+  if (lightValue > 3000) {
+    return "Dark";
+  } else if (lightValue > 2000) {
+    return "Dim";
+  } else if (lightValue > 800) {
+    return "Light";
+  } else if (lightValue > 40) {
+    return "Bright";
   } else {
-    display.println("Light: Very Bright");
+    return "Very Bright";
   }
 }
 
-void getMoistureLevel(int moisture) {
-  if (moisture < 5) {
-    display.println("Moisture: Very Dry");
-  } else if (moisture < 10) {
-    display.println("Moisture: Dry");
-  } else if (moisture < 15) {
-    display.println("Moisture: Moist");
-  } else if (moisture > 19) {
-    display.println("Moisture: Wet");
+String getMoistureLevel(int moistureValue) {
+  if (moistureValue >= 4000) {
+    return "Sensor Dry / Disconnected";
+  } else if (moistureValue > 3500) {
+    return "Very Dry";
+  } else if (moistureValue > 2800) {
+    return "Dry";
+  } else if (moistureValue > 2200) {
+    return "Moist";
+  } else if (moistureValue > 1800) {
+    return "Wet";
   } else {
-    display.println("Moisture: Very Wet");
+    return "Very Wet";
   }
 }
 
-//TODO calibrate the moisture sensor by dry and wet values and use map function to get the percentage 
-//_moisture = map(sensor_analog, dryValue, wetValue, 0, 100);
-//_moisture = constrain(_moisture, 0, 100);
 
-DHTesp dht;
+void handleRoot() {
+  String html = "<html><head><title>Smart Pot</title></head><body>";
+  html += "<meta http-equiv='refresh' content='10'>";
+  html += "<h1>Sensor Values</h1>";
+  html += "<p>Moisture: " + getMoistureLevel(moistureValue); + "</p>";
+  html += "<p>Light: " + getLightLevel(lightValue); + "</p>";
+  html += "<p>Temperature: " + String(temperature) + " &deg;C</p>";
+  html += "<p>Humidity: " + String(humidity) + " %</p>";
+  html += "</body></html>";
+
+//////////////////////////////
+
+/////////////////////////////
+
+  server.send(200, "text/html", html);
+}
+
 void setup() {
-
   Serial.begin(115200);
-  analogSetAttenuation(ADC_6db); // Set ADC attenuation to 11dB for better resolution
-  adcAttachPin(pinMoisture); // Attach the moisture sensor pin to ADC
 
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
-    Serial.println(F("SSD1306 allocation failed"));
-    for(;;);
+  // Initialize sensors
+  dht.begin();
+
+  // Connect to Wi-Fi
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
   }
-  delay(2000);
-  display.clearDisplay();
+  Serial.println("\nConnected! IP address: ");
+  Serial.println(WiFi.localIP());
 
-  display.setTextSize(1);
-  display.setTextColor(WHITE);
-  display.setCursor(0,0);
-  // Display static text
-  display.println("plant pot stats");
-  display.display(); 
+  // Setup HTTP server
+  server.on("/", handleRoot);
+   server.onNotFound([]() {
+    server.sendHeader("Location", "/");
+    server.send(302, "text/plain", "");
+  });
+  server.begin();
 
-  
-  dht.setup(pinDHT, DHTesp::DHT11);
-  
+  // Initial sensor reads
+  moistureValue = analogRead(MOISTURE_PIN);
+  lightValue = analogRead(LIGHT_PIN);
+  humidity = dht.readHumidity();
+  temperature = dht.readTemperature();
+
+  lastMoistureLightRead = millis();
+  lastDHTRead = millis();
 }
+
 void loop() {
+  server.handleClient();
 
-  TempAndHumidity data = dht.getTempAndHumidity();
-  Serial.println("Temp: " + String(data.temperature, 1) + " C");
-  Serial.println("Humidity: " + String(data.humidity, 1) + "%");
-  Serial.println("---");
+  unsigned long currentMillis = millis();
 
-  sensor_analog = analogRead(pinMoisture);
-  Serial.print("Analog Read Value = "); /* Print Analog Read Value on the serial window */
-  Serial.println(sensor_analog);
-  
-  _moisture = ( 100 - ( (sensor_analog/3500.00) * 100 ) );
-  Serial.print("Moisture = ");
-  Serial.print(_moisture);  /* Print Temperature on the serial window */
-  Serial.println("%");
+  // Moisture & light every 30 minutes
+  if (currentMillis - lastMoistureLightRead >= SENSOR_INTERVAL_MS ) { //moistureLightInterval
+    moistureValue = analogRead(MOISTURE_PIN);
+    lightValue = analogRead(LIGHT_PIN);
+    Serial.printf("Moisture: %d, Light: %d\n", moistureValue, lightValue);
+    lastMoistureLightRead = currentMillis;
+    
+  }
 
+  // DHT11 every 15 minutes
+  if (currentMillis - lastDHTRead >= SENSOR_INTERVAL_MS ) { //dhtInterval
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+    if (!isnan(h) && !isnan(t)) {
+      humidity = h;
+      temperature = t - 8; // Adjust for calibration if needed
+      Serial.printf("DHT11 Temp: %.1f °C, Humidity: %.1f %%\n", temperature, humidity);
+    } else {
+      Serial.println("Failed to read from DHT sensor!");
+    }
+    lastDHTRead = currentMillis;
+  }
 
-  // int analogValue = analogRead(pinLight);
-  // Serial.print("Analog Value = ");
-  // Serial.print(analogValue);   // the raw analog reading
-
-  analogValue = analogRead(pinLight);
-
-
-  display.clearDisplay();
-  display.setCursor(0,0);
-  display.println("plant pot stats"); 
-  display.setCursor(0,16);
-  display.println("tempreture: " + String(data.temperature, 2) + "C");
-  display.setCursor(0,16 + 10);
-  display.println("humidity: " + String(data.humidity, 1) + "%");
-  display.setCursor(0,16 + 20);
-  display.println("moisture: " + String(_moisture) + "%");
-  display.setCursor(0,16 + 30);
-  getLightLevel(analogValue); // Call the function to get light level
-  getMoistureLevel(_moisture); // Call the function to get moisture level
-
-  display.setCursor(0,16 + 40);
-  display.display(); 
-
-  delay(1000);
 }
-
-
