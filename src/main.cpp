@@ -1,117 +1,277 @@
-#include "DHTesp.h"
-#include <Adafruit_GFX.h>
+// #include <WiFi.h>
+#include <WebServer.h>
+#include <DHT.h>
 #include <Adafruit_SSD1306.h>
+#include <WifiClientSecure.h>
+#include <PubSubClient.h>
+#include <WifiClientSecure.h>
+#include "tls_ca.h"
 
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 64 // OLED display height, in pixels
-#define OLED_RESET -1 
+#define DHTPIN 4
+#define DHTTYPE DHT11
+#define MOISTURE_PIN 32
+#define LIGHT_PIN 33
+#define PUMP_PIN 5
+#define ACT_PIN 2               // onboard LED for emulation
 
-int pinDHT = 15;
-int pinMoisture = 2; // Pin for soil moisture sensor
-int _moisture,sensor_analog,analogValue;
-int pinLight = 4; // Pin for light sensor (not used in this example, but can be added later)
-// int analogValue = 0; // Variable to store the analog value from the light sensor
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+const char* WIFI_SSID = "A1_A3AEFA";
+const char* WIFI_PASS = "430af6a4";
 
-  void getLightLevel(int analogValue) {
-  if (analogValue > 3000) {
-    display.println("Light: Dark");
-  } else if (analogValue > 2000) {
-    display.println("Light: Dim");
-  } else if (analogValue > 800) {
-    display.println("Light: Light");
-  } else if (analogValue > 40) {
-    display.println("Light: Bright");
-  } else {
-    display.println("Light: Very Bright");
+const char* MQTT_HOST = "4629ff2d3b384c748f95b499f10e4f5b.s1.eu.hivemq.cloud";
+const int   MQTT_PORT = 8883; // TLS (Transport Layer Security)
+const char* MQTT_USER = "hivemq.webclient.1755195003530";
+const char* MQTT_PASS = "8354ECQbTRgAeafh:%!$";
+
+const char* TOPIC_SENS = "plantpot/sensors";
+const char* TOPIC_CMD  = "plantpot/pump"; ///cmd
+const char* TOPIC_ACK  = "plantpot/pump/ack";
+const char* TOPIC_STATUS = "plantpot/status";
+
+// Калибрация и изглаждане
+static const float TEMP_SCALE   = 1.0f;
+static const float TEMP_OFFSET_C= -6.0f;  // твоята температурна корекция
+static const float HUM_SCALE    = 1.0f;
+static const float HUM_OFFSET   = 24.0f;  // твоята влажностна корекция
+static const float EMA_ALPHA    = 0.30f;  // EMA (Exponential Moving Average)
+static float t_ema = NAN, h_ema = NAN;
+unsigned long pumpUntil = 0;
+
+const bool LED_ACTIVE_HIGH = true; // ако не светва, смени на true
+
+inline void ledOn()  { digitalWrite(ACT_PIN, LED_ACTIVE_HIGH ? HIGH : LOW); }
+inline void ledOff() { digitalWrite(ACT_PIN, LED_ACTIVE_HIGH ? LOW  : HIGH); }
+
+WebServer server(80);
+
+DHT dht(DHTPIN, DHTTYPE);
+WiFiClientSecure net;
+PubSubClient mqtt(net);
+
+int moistureValue = 0;
+int lightValue = 0;
+float temperature = 0;
+float humidity = 0;
+
+unsigned long lastMoistureLightRead = 0;
+unsigned long lastDHTRead = 0;
+
+const unsigned long moistureLightInterval = 30UL * 60UL * 1000UL; // 30 minutes
+const unsigned long dhtInterval = 15UL * 60UL * 1000UL;           // 15 minutes
+#define SENSOR_INTERVAL_MS 10000  // 60 seconds
+
+String jsonEscape(const String& s) { // minimal escaper
+  String out; out.reserve(s.length()+4);
+  for (char c: s) { if (c=='"'||c=='\\') out += '\\'; out += c; }
+  return out;
+}
+
+
+void mqttEnsure() {
+  while (!mqtt.connected()) {
+    Serial.print("MQTT connect...");
+    if (mqtt.connect("esp32-plantpot", MQTT_USER, MQTT_PASS)) {
+      Serial.println("ok");
+    } else {
+      Serial.printf("fail rc=%d, retry in 5s\n", mqtt.state());
+      delay(5000);
+    }
   }
 }
 
-void getMoistureLevel(int moisture) {
-  if (moisture < 5) {
-    display.println("Moisture: Very Dry");
-  } else if (moisture < 10) {
-    display.println("Moisture: Dry");
-  } else if (moisture < 15) {
-    display.println("Moisture: Moist");
-  } else if (moisture > 19) {
-    display.println("Moisture: Wet");
+
+
+// void onMqtt(char* topic, byte* payload, unsigned int len){
+//   String t(topic);
+//   String msg; msg.reserve(len); for (unsigned i=0;i<len;i++) msg += (char)payload[i];
+
+//   if (t == TOPIC_CMD){
+//     String result = "error";
+//     if (msg.equalsIgnoreCase("ON"))  { digitalWrite(PUMP_PIN, HIGH); result="ok"; }
+//     if (msg.equalsIgnoreCase("OFF")) { digitalWrite(PUMP_PIN, LOW);  result="ok"; }
+//     // прост ACK (JSON (JavaScript Object Notation))
+//     String ack = String("{\"cmd\":\"")+msg+"\",\"result\":\""+result+"\"}";
+//     mqtt.publish(TOPIC_ACK, ack.c_str(), false);
+//   }
+// }
+
+ String getLightLevel(int lightValue) {
+  if (lightValue > 3000) {
+    return "Dark";
+  } else if (lightValue > 2000) {
+    return "Dim";
+  } else if (lightValue > 800) {
+    return "Light";
+  } else if (lightValue > 40) {
+    return "Bright";
   } else {
-    display.println("Moisture: Very Wet");
+    return "Very Bright";
   }
 }
 
-//TODO calibrate the moisture sensor by dry and wet values and use map function to get the percentage 
-//_moisture = map(sensor_analog, dryValue, wetValue, 0, 100);
-//_moisture = constrain(_moisture, 0, 100);
+String getMoistureLevel(int moistureValue) {
+  if (moistureValue >= 4000) {
+    return "Sensor Dry / Disconnected";
+  } else if (moistureValue > 3500) {
+    return "Very Dry";
+  } else if (moistureValue > 2800) {
+    return "Dry";
+  } else if (moistureValue > 2200) {
+    return "Moist";
+  } else if (moistureValue > 1800) {
+    return "Wet";
+  } else {
+    return "Very Wet";
+  }
+}
 
-DHTesp dht;
+  String lightLabel(int v){
+  if (v > 3000) return "Dark";
+  else if (v > 2000) return "Dim";
+  else if (v > 800)  return "Light";
+  else if (v > 40)   return "Bright";
+  else               return "Very Bright";
+}
+String moistureLabel(int v){
+  if (v >= 4000) return "Sensor Dry / Disconnected";
+  else if (v > 3500) return "Very Dry";
+  else if (v > 2800) return "Dry";
+  else if (v > 2200) return "Moist";
+  else if (v > 1800) return "Wet";
+  else return "Very Wet";
+}
+
+
+    void onMqtt(char* topic, byte* payload, unsigned int len){
+  String t(topic);
+  String msg; msg.reserve(len);
+  for (unsigned i=0;i<len;i++) msg += (char)payload[i];
+  msg.trim();
+
+  if (t == TOPIC_CMD){
+    String result = "ok";
+    String up = msg; up.toUpperCase();
+
+    if (up.startsWith("ON")){
+      int ms = 5000;
+      int sp = up.indexOf(' ');
+      if (sp > 0) {
+        int sec = up.substring(sp+1).toInt();
+        ms = constrain(sec*1000, 500, 600000);
+      }
+      ledOn();
+      pumpUntil = millis() + ms;
+    } else if (up == "OFF"){
+      ledOff();
+      pumpUntil = 0;
+    } else {
+      result = "bad_cmd";
+    }
+
+    String ack = String("{\"cmd\":\"")+msg+"\",\"result\":\""+result+"\"}";
+    mqtt.publish(TOPIC_ACK, ack.c_str(), false);
+  }
+}
+
+
+  bool mqttConnect(){
+    // net.setInsecure(); // за бърз старт; за дипломна ползвай setCACert(...) вместо това
+    net.setCACert(TLS_CA_PEM);
+    mqtt.setServer(MQTT_HOST, MQTT_PORT);
+    mqtt.setCallback(onMqtt);
+    mqtt.setKeepAlive(10);
+
+    // will: "offline" retained
+    const char* clientId = "esp32-plantpot";
+
+    if (!mqtt.connect(clientId, MQTT_USER, MQTT_PASS,
+                      TOPIC_STATUS, 1, true, "offline")) return false;
+
+    mqtt.publish(TOPIC_STATUS, "online", true); // retained "online"
+    mqtt.subscribe(TOPIC_CMD);     
+                 // команди към помпата
+    return true;
+  }
+
+  // Connect to Wi-Fi
+    void wifiConnect(){
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    while (WiFi.status()!=WL_CONNECTED){ delay(300); }
+  }
+
+
+
+int clampi(int v,int lo,int hi){ return v<lo?lo:(v>hi?hi:v); }
+
+
+
 void setup() {
-
   Serial.begin(115200);
-  analogSetAttenuation(ADC_6db); // Set ADC attenuation to 11dB for better resolution
-  adcAttachPin(pinMoisture); // Attach the moisture sensor pin to ADC
 
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
-    Serial.println(F("SSD1306 allocation failed"));
-    for(;;);
-  }
-  delay(2000);
-  display.clearDisplay();
+  pinMode(PUMP_PIN, OUTPUT); 
+  digitalWrite(PUMP_PIN, LOW);
+  pinMode(ACT_PIN,  OUTPUT); ledOff();
 
-  display.setTextSize(1);
-  display.setTextColor(WHITE);
-  display.setCursor(0,0);
-  // Display static text
-  display.println("plant pot stats");
-  display.display(); 
+  dht.begin();
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
 
-  
-  dht.setup(pinDHT, DHTesp::DHT11);
-  
+  wifiConnect();
+  // If mqttConnect() already does setCallback(onMqtt), do NOT call it here.
+  mqtt.setCallback(onMqtt);
+  while (!mqttConnect()) { delay(2000); }
+
 }
+
 void loop() {
+  if (!mqtt.connected()) {
+    if (!mqttConnect()) { delay(2000); return; }
+  }
+  mqtt.loop();
 
-  TempAndHumidity data = dht.getTempAndHumidity();
-  Serial.println("Temp: " + String(data.temperature, 1) + " C");
-  Serial.println("Humidity: " + String(data.humidity, 1) + "%");
-  Serial.println("---");
+  // auto-OFF every loop, precise timing
+  if (pumpUntil && (long)(millis() - pumpUntil) >= 0) {
+    ledOff();
+    pumpUntil = 0;
+    mqtt.publish(TOPIC_ACK, "{\"cmd\":\"AUTO_OFF\",\"result\":\"ok\"}", false);
+  }
 
-  sensor_analog = analogRead(pinMoisture);
-  Serial.print("Analog Read Value = "); /* Print Analog Read Value on the serial window */
-  Serial.println(sensor_analog);
-  
-  _moisture = ( 100 - ( (sensor_analog/3500.00) * 100 ) );
-  Serial.print("Moisture = ");
-  Serial.print(_moisture);  /* Print Temperature on the serial window */
-  Serial.println("%");
+  static unsigned long t0 = 0;
+  if (millis() - t0 >= 10000) {
+    t0 = millis();
 
+    moistureValue = analogRead(MOISTURE_PIN);
+    lightValue    = analogRead(LIGHT_PIN);
 
-  // int analogValue = analogRead(pinLight);
-  // Serial.print("Analog Value = ");
-  // Serial.print(analogValue);   // the raw analog reading
+    float h_raw = dht.readHumidity();
+    float t_raw = dht.readTemperature();
+    bool dhtOK = !(isnan(h_raw) || isnan(t_raw));
+    if (dhtOK) {
+      float t_corr = t_raw * TEMP_SCALE + TEMP_OFFSET_C;
+      float h_corr = h_raw * HUM_SCALE  + HUM_OFFSET;
+      h_corr = constrain(h_corr, 0.0f, 100.0f);
 
-  analogValue = analogRead(pinLight);
+      if (isnan(t_ema)) { t_ema = t_corr; h_ema = h_corr; }
+      else {
+        t_ema = EMA_ALPHA * t_corr + (1.0f - EMA_ALPHA) * t_ema;
+        h_ema = EMA_ALPHA * h_corr + (1.0f - EMA_ALPHA) * h_ema;
+      }
+      temperature = t_ema;
+      humidity    = h_ema;
+    }
 
+    String payload = "{";
+    payload += "\"temp_c\":"      + String(temperature, 1) + ",";
+    payload += "\"humidity\":"    + String(humidity, 1) + ",";
+    payload += "\"moistureValue\":\"" + moistureLabel(moistureValue) + "\",";
+    payload += "\"lightValue\":\""    + lightLabel(lightValue) + "\"";
+    payload += "}";
 
-  display.clearDisplay();
-  display.setCursor(0,0);
-  display.println("plant pot stats"); 
-  display.setCursor(0,16);
-  display.println("tempreture: " + String(data.temperature, 2) + "C");
-  display.setCursor(0,16 + 10);
-  display.println("humidity: " + String(data.humidity, 1) + "%");
-  display.setCursor(0,16 + 20);
-  display.println("moisture: " + String(_moisture) + "%");
-  display.setCursor(0,16 + 30);
-  getLightLevel(analogValue); // Call the function to get light level
-  getMoistureLevel(_moisture); // Call the function to get moisture level
-
-  display.setCursor(0,16 + 40);
-  display.display(); 
-
-  delay(1000);
+    if (mqtt.publish(TOPIC_SENS, payload.c_str())) {
+      Serial.println("Published: " + payload);
+    } else {
+      Serial.println("Publish failed");
+    }
+  }
 }
-
-
