@@ -1,52 +1,52 @@
-// #include <WiFi.h>
-#include <WebServer.h>
 #include <DHT.h>
-#include <Adafruit_SSD1306.h>
-#include <WifiClientSecure.h>
-#include <PubSubClient.h>
-#include <WifiClientSecure.h>
-#include "tls_ca.h"
+#include "pp_sensors.h"
+#include "pp_state.h"
+#include "pp_topics.h"
+#include "pp_net.h"
+#include "pp_auto.h"
+#include "pp_diag.h"
+#include "pp_publish.h"
 
-#define DHTPIN 4
-#define DHTTYPE DHT11
-#define MOISTURE_PIN 32
-#define LIGHT_PIN 33
-#define PUMP_PIN 5
-#define ACT_PIN 2               // onboard LED for emulation
 
+
+const int DHTPIN = 4;      // DHT11 pin
+// DHTTYPE остава макро от DHT.h -> не пипай
+const int MOISTURE_PIN = 32;
+const int LIGHT_PIN = 33;
+const int PUMP_PIN = 5;
+const int ACT_PIN  = 2;               // onboard LED for emulation
 
 const char* WIFI_SSID = "A1_A3AEFA";
 const char* WIFI_PASS = "430af6a4";
+
+const char* WIFI_SSID_backup = "Wirty";
+const char* WIFI_PASS_backup = "123456789";
 
 const char* MQTT_HOST = "4629ff2d3b384c748f95b499f10e4f5b.s1.eu.hivemq.cloud";
 const int   MQTT_PORT = 8883; // TLS (Transport Layer Security)
 const char* MQTT_USER = "hivemq.webclient.1755195003530";
 const char* MQTT_PASS = "8354ECQbTRgAeafh:%!$";
 
+
 const char* TOPIC_SENS = "plantpot/sensors";
 const char* TOPIC_CMD  = "plantpot/pump"; ///cmd
 const char* TOPIC_ACK  = "plantpot/pump/ack";
 const char* TOPIC_STATUS = "plantpot/status";
-
-// Калибрация и изглаждане
-static const float TEMP_SCALE   = 1.0f;
-static const float TEMP_OFFSET_C= -6.0f;  // твоята температурна корекция
-static const float HUM_SCALE    = 1.0f;
-static const float HUM_OFFSET   = 24.0f;  // твоята влажностна корекция
-static const float EMA_ALPHA    = 0.30f;  // EMA (Exponential Moving Average)
-static float t_ema = NAN, h_ema = NAN;
-unsigned long pumpUntil = 0;
+const char* TOPIC_DIAG = "plantpot/diag";
+const char* TOPIC_CFG  = "plantpot/cfg";
 
 const bool LED_ACTIVE_HIGH = true; // ако не светва, смени на true
 
-inline void ledOn()  { digitalWrite(ACT_PIN, LED_ACTIVE_HIGH ? HIGH : LOW); }
-inline void ledOff() { digitalWrite(ACT_PIN, LED_ACTIVE_HIGH ? LOW  : HIGH); }
+void ledOn()  { digitalWrite(ACT_PIN, HIGH); }
+void ledOff() { digitalWrite(ACT_PIN, LOW);  }
 
-WebServer server(80);
+// inline void ledOn()  { digitalWrite(ACT_PIN, LED_ACTIVE_HIGH ? HIGH : LOW); }
+// inline void ledOff() { digitalWrite(ACT_PIN, LED_ACTIVE_HIGH ? LOW  : HIGH); }
 
-DHT dht(DHTPIN, DHTTYPE);
+
 WiFiClientSecure net;
 PubSubClient mqtt(net);
+unsigned long pumpUntil = 0;
 
 int moistureValue = 0;
 int lightValue = 0;
@@ -56,44 +56,20 @@ float humidity = 0;
 unsigned long lastMoistureLightRead = 0;
 unsigned long lastDHTRead = 0;
 
-const unsigned long moistureLightInterval = 30UL * 60UL * 1000UL; // 30 minutes
-const unsigned long dhtInterval = 15UL * 60UL * 1000UL;           // 15 minutes
-#define SENSOR_INTERVAL_MS 10000  // 60 seconds
+static unsigned long nextWifiRetry = 0;
+static unsigned long wifiBackoffMs = 1000;   // старт 1 s, кап 60 s
+static unsigned long nextMqttRetry = 0;
+static unsigned long mqttBackoffMs = 1000;   // старт 1 s, кап 60 s
+static bool usingBackup = false;
+
+
+static const float SOIL_ALPHA = 0.20f; // EMA
 
 String jsonEscape(const String& s) { // minimal escaper
   String out; out.reserve(s.length()+4);
   for (char c: s) { if (c=='"'||c=='\\') out += '\\'; out += c; }
   return out;
 }
-
-
-void mqttEnsure() {
-  while (!mqtt.connected()) {
-    Serial.print("MQTT connect...");
-    if (mqtt.connect("esp32-plantpot", MQTT_USER, MQTT_PASS)) {
-      Serial.println("ok");
-    } else {
-      Serial.printf("fail rc=%d, retry in 5s\n", mqtt.state());
-      delay(5000);
-    }
-  }
-}
-
-
-
-// void onMqtt(char* topic, byte* payload, unsigned int len){
-//   String t(topic);
-//   String msg; msg.reserve(len); for (unsigned i=0;i<len;i++) msg += (char)payload[i];
-
-//   if (t == TOPIC_CMD){
-//     String result = "error";
-//     if (msg.equalsIgnoreCase("ON"))  { digitalWrite(PUMP_PIN, HIGH); result="ok"; }
-//     if (msg.equalsIgnoreCase("OFF")) { digitalWrite(PUMP_PIN, LOW);  result="ok"; }
-//     // прост ACK (JSON (JavaScript Object Notation))
-//     String ack = String("{\"cmd\":\"")+msg+"\",\"result\":\""+result+"\"}";
-//     mqtt.publish(TOPIC_ACK, ack.c_str(), false);
-//   }
-// }
 
  String getLightLevel(int lightValue) {
   if (lightValue > 3000) {
@@ -142,136 +118,94 @@ String moistureLabel(int v){
 }
 
 
-    void onMqtt(char* topic, byte* payload, unsigned int len){
-  String t(topic);
-  String msg; msg.reserve(len);
-  for (unsigned i=0;i<len;i++) msg += (char)payload[i];
-  msg.trim();
-
-  if (t == TOPIC_CMD){
-    String result = "ok";
-    String up = msg; up.toUpperCase();
-
-    if (up.startsWith("ON")){
-      int ms = 5000;
-      int sp = up.indexOf(' ');
-      if (sp > 0) {
-        int sec = up.substring(sp+1).toInt();
-        ms = constrain(sec*1000, 500, 600000);
-      }
-      ledOn();
-      pumpUntil = millis() + ms;
-    } else if (up == "OFF"){
-      ledOff();
-      pumpUntil = 0;
-    } else {
-      result = "bad_cmd";
-    }
-
-    String ack = String("{\"cmd\":\"")+msg+"\",\"result\":\""+result+"\"}";
-    mqtt.publish(TOPIC_ACK, ack.c_str(), false);
+  // Connect to Wi-Fi
+ static bool wifiTry(const char* ssid, const char* pass, uint32_t timeoutMs){
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, pass);
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - t0) < timeoutMs) {
+    delay(250);
   }
+  return WiFi.status() == WL_CONNECTED;
 }
 
-
-  bool mqttConnect(){
-    // net.setInsecure(); // за бърз старт; за дипломна ползвай setCACert(...) вместо това
-    net.setCACert(TLS_CA_PEM);
-    mqtt.setServer(MQTT_HOST, MQTT_PORT);
-    mqtt.setCallback(onMqtt);
-    mqtt.setKeepAlive(10);
-
-    // will: "offline" retained
-    const char* clientId = "esp32-plantpot";
-
-    if (!mqtt.connect(clientId, MQTT_USER, MQTT_PASS,
-                      TOPIC_STATUS, 1, true, "offline")) return false;
-
-    mqtt.publish(TOPIC_STATUS, "online", true); // retained "online"
-    mqtt.subscribe(TOPIC_CMD);     
-                 // команди към помпата
-    return true;
-  }
-
-  // Connect to Wi-Fi
-    void wifiConnect(){
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-    while (WiFi.status()!=WL_CONNECTED){ delay(300); }
-  }
+void wifiConnect(){
+  // преминаваме към неблокираща, събитийна логика; не прави нищо тук
+}
 
 
 
 int clampi(int v,int lo,int hi){ return v<lo?lo:(v>hi?hi:v); }
 
 
+void sensorsRead();
 
 void setup() {
   Serial.begin(115200);
-
-  pinMode(PUMP_PIN, OUTPUT); 
-  digitalWrite(PUMP_PIN, LOW);
+  sensorsInit();
+  pinMode(PUMP_PIN, OUTPUT); digitalWrite(PUMP_PIN, LOW);
   pinMode(ACT_PIN,  OUTPUT); ledOff();
 
-  dht.begin();
+  WiFi.onEvent(onWifiEvent);
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
 
-  wifiConnect();
-  // If mqttConnect() already does setCallback(onMqtt), do NOT call it here.
-  mqtt.setCallback(onMqtt);
-  while (!mqttConnect()) { delay(2000); }
+  usingBackup = false;     // започни с primary
+  nextWifiRetry = 0;       // позволи незабавен опит
+  wifiTick();              // kick
 
+  // MQTT ще се свърже през mqttEnsure() в loop()
+// END REPLACE setup_header
 }
 
 void loop() {
-  if (!mqtt.connected()) {
-    if (!mqttConnect()) { delay(2000); return; }
-  }
-  mqtt.loop();
+  
+  wifiTick();
+  mqttEnsure();
+  if (mqtt.connected()) mqtt.loop();
 
   // auto-OFF every loop, precise timing
   if (pumpUntil && (long)(millis() - pumpUntil) >= 0) {
-    ledOff();
-    pumpUntil = 0;
-    mqtt.publish(TOPIC_ACK, "{\"cmd\":\"AUTO_OFF\",\"result\":\"ok\"}", false);
-  }
+  // pumpOff();
+  ledOff();
+  pumpUntil = 0;
+  mqtt.publish(TOPIC_ACK, "{\"cmd\":\"AUTO_OFF\",\"result\":\"ok\"}", false);
+}
+
 
   static unsigned long t0 = 0;
   if (millis() - t0 >= 10000) {
     t0 = millis();
 
+    sensorsRead();
+
     moistureValue = analogRead(MOISTURE_PIN);
-    lightValue    = analogRead(LIGHT_PIN);
+    if (isnan(soil_ema)) soil_ema = moistureValue;
+    else soil_ema = 0.20f * moistureValue + 0.80f * soil_ema;
+    lightValue = analogRead(LIGHT_PIN);
 
-    float h_raw = dht.readHumidity();
-    float t_raw = dht.readTemperature();
-    bool dhtOK = !(isnan(h_raw) || isnan(t_raw));
-    if (dhtOK) {
-      float t_corr = t_raw * TEMP_SCALE + TEMP_OFFSET_C;
-      float h_corr = h_raw * HUM_SCALE  + HUM_OFFSET;
-      h_corr = constrain(h_corr, 0.0f, 100.0f);
+      // === AUTO режим ===
+  // Включи ако СУХО (soil_ema >= soilLow) и не помпи в момента
+  if (autoEnabled && pumpUntil == 0 && soil_ema >= soilLow) {
+    unsigned long ms = autoMaxMs;  // може да направим и импулси по-къси по-късно
+    pumpOn();
+    pumpUntil = millis() + ms;
+    mqtt.publish(TOPIC_ACK, "{\"cmd\":\"AUTO_START\",\"result\":\"ok\"}", false);
+  }
 
-      if (isnan(t_ema)) { t_ema = t_corr; h_ema = h_corr; }
-      else {
-        t_ema = EMA_ALPHA * t_corr + (1.0f - EMA_ALPHA) * t_ema;
-        h_ema = EMA_ALPHA * h_corr + (1.0f - EMA_ALPHA) * h_ema;
-      }
-      temperature = t_ema;
-      humidity    = h_ema;
-    }
+  // Ранно спиране ако вече е Мокро (soil_ema <= soilHigh)
+  if (autoEnabled && pumpUntil != 0 && soil_ema <= soilHigh) {
+    pumpOff();
+    pumpUntil = 0;
+    mqtt.publish(TOPIC_ACK, "{\"cmd\":\"AUTO_STOP\",\"result\":\"ok\"}", false);
+  }
+    publishSensors();
 
-    String payload = "{";
-    payload += "\"temp_c\":"      + String(temperature, 1) + ",";
-    payload += "\"humidity\":"    + String(humidity, 1) + ",";
-    payload += "\"moistureValue\":\"" + moistureLabel(moistureValue) + "\",";
-    payload += "\"lightValue\":\""    + lightLabel(lightValue) + "\"";
-    payload += "}";
-
-    if (mqtt.publish(TOPIC_SENS, payload.c_str())) {
-      Serial.println("Published: " + payload);
-    } else {
-      Serial.println("Publish failed");
+    static unsigned long tDiag = 0;
+    if (millis() - tDiag >= 60000UL) {
+      tDiag = millis();
+      if (mqtt.connected()) publishDiag();
     }
   }
+  autoTick();
 }
