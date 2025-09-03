@@ -8,13 +8,12 @@
 #include "pp_publish.h"
 
 
-
-const int DHTPIN = 4;      // DHT11 pin
 // DHTTYPE остава макро от DHT.h -> не пипай
-const int MOISTURE_PIN = 32;
-const int LIGHT_PIN = 33;
-const int PUMP_PIN = 5;
-const int ACT_PIN  = 2;               // onboard LED for emulation
+const int DHTPIN       = 2;
+const int MOISTURE_PIN = 0;
+const int LIGHT_PIN    = 1;
+const int PUMP_PIN     = 5;
+const int ACT_PIN      = 15; // onboard LED for emulation
 
 const char* WIFI_SSID = "A1_A3AEFA";
 const char* WIFI_PASS = "430af6a4";
@@ -35,10 +34,10 @@ const char* TOPIC_STATUS = "plantpot/status";
 const char* TOPIC_DIAG = "plantpot/diag";
 const char* TOPIC_CFG  = "plantpot/cfg";
 
-const bool LED_ACTIVE_HIGH = true; // ако не светва, смени на true
+const bool LED_ACTIVE_HIGH = false; // ако не светва, смени на true
 
-void ledOn()  { digitalWrite(ACT_PIN, HIGH); }
-void ledOff() { digitalWrite(ACT_PIN, LOW);  }
+void ledOn()  { digitalWrite(ACT_PIN,LED_ACTIVE_HIGH ? HIGH : LOW); }
+void ledOff() { digitalWrite(ACT_PIN, LED_ACTIVE_HIGH ? LOW  : HIGH);  }
 
 // inline void ledOn()  { digitalWrite(ACT_PIN, LED_ACTIVE_HIGH ? HIGH : LOW); }
 // inline void ledOff() { digitalWrite(ACT_PIN, LED_ACTIVE_HIGH ? LOW  : HIGH); }
@@ -119,19 +118,19 @@ String moistureLabel(int v){
 
 
   // Connect to Wi-Fi
- static bool wifiTry(const char* ssid, const char* pass, uint32_t timeoutMs){
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, pass);
-  uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - t0) < timeoutMs) {
-    delay(250);
-  }
-  return WiFi.status() == WL_CONNECTED;
-}
+//  static bool wifiTry(const char* ssid, const char* pass, uint32_t timeoutMs){
+//   WiFi.mode(WIFI_STA);
+//   WiFi.begin(ssid, pass);
+//   uint32_t t0 = millis();
+//   while (WiFi.status() != WL_CONNECTED && (millis() - t0) < timeoutMs) {
+//     delay(250);
+//   }
+//   return WiFi.status() == WL_CONNECTED;
+// }
 
-void wifiConnect(){
-  // преминаваме към неблокираща, събитийна логика; не прави нищо тук
-}
+// void wifiConnect(){
+//   // преминаваме към неблокираща, събитийна логика; не прави нищо тук
+// }
 
 
 
@@ -146,13 +145,19 @@ void setup() {
   pinMode(PUMP_PIN, OUTPUT); digitalWrite(PUMP_PIN, LOW);
   pinMode(ACT_PIN,  OUTPUT); ledOff();
 
-  WiFi.onEvent(onWifiEvent);
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
+  analogSetPinAttenuation(MOISTURE_PIN, ADC_11db);
+
+
+  // WiFi.onEvent(onWifiEvent);
+  WiFi.begin(WIFI_SSID_backup, WIFI_PASS_backup);
+  // analogReadResolution(12);
+  // analogSetAttenuation(ADC_11db);
 
   usingBackup = false;     // започни с primary
   nextWifiRetry = 0;       // позволи незабавен опит
-  wifiTick();              // kick
+  // wifiTick();              // kick
 
   // MQTT ще се свърже през mqttEnsure() в loop()
 // END REPLACE setup_header
@@ -160,7 +165,7 @@ void setup() {
 
 void loop() {
   
-  wifiTick();
+  // wifiTick();
   mqttEnsure();
   if (mqtt.connected()) mqtt.loop();
 
@@ -179,10 +184,10 @@ void loop() {
 
     sensorsRead();
 
-    moistureValue = analogRead(MOISTURE_PIN);
+    // moistureValue = analogRead(MOISTURE_PIN);
     if (isnan(soil_ema)) soil_ema = moistureValue;
     else soil_ema = 0.20f * moistureValue + 0.80f * soil_ema;
-    lightValue = analogRead(LIGHT_PIN);
+    // lightValue = analogRead(LIGHT_PIN);
 
       // === AUTO режим ===
   // Включи ако СУХО (soil_ema >= soilLow) и не помпи в момента
@@ -206,6 +211,8 @@ void loop() {
       tDiag = millis();
       if (mqtt.connected()) publishDiag();
     }
+    Serial.printf("soil_raw=%d  soil_ema=%.1f  light_raw=%d\n",
+              moistureValue, soil_ema, lightValue);
   }
   autoTick();
 }

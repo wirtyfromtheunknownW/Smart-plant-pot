@@ -1,14 +1,16 @@
 {
     "folders": [
         {
+            "name": "Smart plant pot",
             "path": "."
+        },
+        {
+            "name": "smart-pot-dashboard",
+            "path": "../smart-pot-dashboard"
         },
         {
             "name": "wifitest",
             "path": "../wifitest"
-        },
-        {
-            "path": "../smart-pot-dashboard"
         },
         {
             "name": "testdht",
@@ -25,7 +27,8 @@
             "vector": "cpp",
             "string_view": "cpp",
             "initializer_list": "cpp",
-            "cmath": "cpp"
+            "cmath": "cpp",
+            "code": "cpp"
         }
     }
 }

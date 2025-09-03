@@ -2,7 +2,8 @@
 #include <WiFi.h>
 #include "pp_state.h"
 #include "pp_topics.h"
-#include "pp_auto.h"      // autoEnabled, soil_ema, soilLow/High, autoMaxMs
+#include "pp_auto.h"  // autoEnabled, soil_ema, soilLow/High, autoMaxMs
+#include "pp_sensors.h"    
 
 // локални хелпъри (идентични на твоите)
 static String lightLabel(int v){

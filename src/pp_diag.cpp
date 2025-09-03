@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include "pp_state.h"
 #include "pp_topics.h"
+#include "pp_sensors.h"
+#include  "pp_net.h"
 
 void publishDiag() {
   unsigned long up = millis() / 1000UL;

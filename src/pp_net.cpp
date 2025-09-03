@@ -6,6 +6,11 @@
 #include "pp_net.h"
 #include "pp_auto.h"      // за onMqtt()
 #include "tls_ca.h"
+#include <esp_wifi.h>
+
+#ifndef WIFI_COUNTRY
+#define WIFI_COUNTRY "BG"
+#endif
 
 // extern void onMqtt(char* topic, byte* payload, unsigned int len);
 
@@ -25,10 +30,26 @@ static unsigned long nextMqttRetry = 0;
 static unsigned long mqttBackoffMs = 1000;
 static bool usingBackup = false;
 
+#if defined(ARDUINO_EVENT_WIFI_STA_GOT_IP)
+  #define EVT_GOT_IP   ARDUINO_EVENT_WIFI_STA_GOT_IP
+  #define EVT_DISCONN  ARDUINO_EVENT_WIFI_STA_DISCONNECTED
+#elif defined(IP_EVENT_STA_GOT_IP) && defined(WIFI_EVENT_STA_DISCONNECTED)
+  #define EVT_GOT_IP   IP_EVENT_STA_GOT_IP
+  #define EVT_DISCONN  WIFI_EVENT_STA_DISCONNECTED
+#else
+  // very old cores
+  #define EVT_GOT_IP   SYSTEM_EVENT_STA_GOT_IP
+  #define EVT_DISCONN  SYSTEM_EVENT_STA_DISCONNECTED
+#endif
+
+extern void onMqtt(char* topic, uint8_t* payload, unsigned int length);
+
 void wifiStartAttempt() {
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
   WiFi.setAutoReconnect(false);
+  WiFi.setHostname("esp32-plantpot");
+
   const char* ssid = usingBackup ? WIFI_SSID_backup : WIFI_SSID;
   const char* pass = usingBackup ? WIFI_PASS_backup : WIFI_PASS;
   Serial.printf("WiFi begin -> %s\n", ssid);
@@ -37,17 +58,18 @@ void wifiStartAttempt() {
 
 void onWifiEvent(WiFiEvent_t event) {
   switch(event) {
-    case SYSTEM_EVENT_STA_GOT_IP:
+    case IP_EVENT_STA_GOT_IP:
       Serial.printf("WiFi IP: %s\n", WiFi.localIP().toString().c_str());
       wifiBackoffMs = 1000;
       nextMqttRetry = 0; mqttBackoffMs = 1000;
       break;
-    case SYSTEM_EVENT_STA_DISCONNECTED:
-      Serial.println("WiFi disconnected");
+
+    case WIFI_EVENT_STA_DISCONNECTED:
       nextWifiRetry = millis() + wifiBackoffMs;
       wifiBackoffMs = min<unsigned long>(wifiBackoffMs * 2, 60000);
-      usingBackup = !usingBackup; // редуване primary/backup
+      usingBackup = !usingBackup;
       break;
+
     default: break;
   }
 }
@@ -89,3 +111,4 @@ void mqttEnsure() {
     mqttBackoffMs = min<unsigned long>(mqttBackoffMs * 2, 60000);
   }
 }
+

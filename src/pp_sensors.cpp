@@ -4,20 +4,26 @@
 #include "pp_auto.h"     // за soil_ema
 #include "pp_sensors.h"
 
-// === Константи за калибрация и изглаждане (преместени от main.cpp) ===
+// === Константи за калибрация и изглаждане ===
 static const float TEMP_SCALE    = 1.0f;
-static const float TEMP_OFFSET_C = -6.0f;  // твоята температурна корекция
+static const float TEMP_OFFSET_C = 0.0f;  // твоята температурна корекция
 static const float HUM_SCALE     = 1.0f;
-static const float HUM_OFFSET    = 24.0f;  // твоята влажностна корекция
+static const float HUM_OFFSET    = 0.0f;  // твоята влажностна корекция
 static const float EMA_ALPHA_TH  = 0.30f;  // EMA за T/H
 static const float SOIL_ALPHA    = 0.20f;  // EMA за почва (същото като в авто)
 
+// const int DHTPIN       = D1;
+// const int MOISTURE_PIN = A0;  
+// const int LIGHT_PIN    = A1;  
+// const int PUMP_PIN     = D5;
+// const int ACT_PIN      = D10;
+
 // === Пинове за DHT – дефинирани са в main.cpp като макроси ===
 #ifndef DHTPIN
-#define DHTPIN 4
+#define DHTPIN 2
 #endif
 #ifndef DHTTYPE
-#define DHTTYPE DHT11
+#define DHTTYPE DHT22
 #endif
 
 // Локални EMA акумулатори за T/H
@@ -26,10 +32,20 @@ static float t_ema = NAN, h_ema = NAN;
 // Локален DHT обект
 static DHT dht(DHTPIN, DHTTYPE);
 
+// void sensorsInit() {
+//   dht.begin();
+//   analogReadResolution(12);
+//   analogSetAttenuation(ADC_11db);
+// }
+
 void sensorsInit() {
   dht.begin();
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
+  analogSetPinAttenuation(MOISTURE_PIN, ADC_11db);
+  analogSetPinAttenuation(LIGHT_PIN,    ADC_11db);
+  pinMode(MOISTURE_PIN, INPUT);
+  pinMode(LIGHT_PIN,    INPUT);
 }
 
 void sensorsRead() {
@@ -37,6 +53,7 @@ void sensorsRead() {
   moistureValue = analogRead(MOISTURE_PIN);
   lightValue    = analogRead(LIGHT_PIN);
 
+  
   // EMA за почвата, стойността е глобална (в pp_auto.h)
   if (isnan(soil_ema)) soil_ema = moistureValue;
   else soil_ema = SOIL_ALPHA * moistureValue + (1.0f - SOIL_ALPHA) * soil_ema;

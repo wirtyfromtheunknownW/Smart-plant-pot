@@ -85,6 +85,7 @@
 #include "pp_state.h"
 #include "pp_topics.h"
 #include "pp_auto.h"
+#include "pp_sensors.h"
 
 // дефиниции
 bool  autoEnabled = false;
